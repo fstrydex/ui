@@ -82,6 +82,31 @@ export default function CanvasStage({
       return;
     }
 
+    const resizeTapeHandle = e.target.closest("[data-resize-tape]");
+    if (resizeTapeHandle) {
+      const objId = resizeTapeHandle.getAttribute("data-resize-tape");
+      const side = resizeTapeHandle.getAttribute("data-resize-side") || "right";
+      const targetObj = currentLayout.objects.find((o) => o.id === objId);
+      if (!targetObj) return;
+
+      dragRef.current = {
+        mode: "resize_tape",
+        id: objId,
+        side,
+        startSvg: clientToSvgCoords(containerRef.current, e.clientX, e.clientY),
+        origX: targetObj.center_x,
+        origY: targetObj.center_y,
+        origW: Number(targetObj.width_mm) || 48,
+        rotationRad: ((targetObj.rotation_degrees || 0) * Math.PI) / 180,
+        latestLayout: currentLayout,
+        moved: false,
+      };
+      setDraggingId(objId);
+      containerRef.current?.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+      return;
+    }
+
     const group = e.target.closest('g[data-draggable="true"][id]');
     if (!group) return;
 
@@ -121,6 +146,28 @@ export default function CanvasStage({
       updatedObjects = active.latestLayout.objects.map((obj) =>
         obj.id === active.id ? { ...obj, rotation_degrees: rot } : obj
       );
+    } else if (active.mode === "resize_tape") {
+      const dx = pos.x - active.startSvg.x;
+      const dy = pos.y - active.startSvg.y;
+      const cosR = Math.cos(active.rotationRad);
+      const sinR = Math.sin(active.rotationRad);
+      const along = dx * cosR + dy * sinR;
+      const dir = active.side === "left" ? -1 : 1;
+      const newW = Math.max(16, Math.min(200, Math.round(active.origW + along * dir)));
+      const actualDelta = newW - active.origW;
+      const centerShift = (dir * actualDelta) / 2;
+
+      updatedObjects = active.latestLayout.objects.map((obj) => {
+        if (obj.id !== active.id) return obj;
+        const resized = {
+          ...obj,
+          width_mm: newW,
+          center_x: Number((active.origX + centerShift * cosR).toFixed(1)),
+          center_y: Number((active.origY + centerShift * sinR).toFixed(1)),
+        };
+        clampToMargin(resized);
+        return resized;
+      });
     } else {
       const dx = pos.x - active.startSvg.x;
       const dy = pos.y - active.startSvg.y;

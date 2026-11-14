@@ -3,10 +3,17 @@ import { useEffect, useState } from "react";
 import CanvasStage from "@/components/CanvasStage";
 import IntakeSidebar, { SIZE_OPTIONS } from "@/components/IntakeSidebar";
 import InventoryTray from "@/components/InventoryTray";
-import { cropBoxToDataUrl, cropCutoutsFromSheet, normalizeImageDataUrl } from "@/lib/contourCutter";
+import {
+  buildWashiTapeItems,
+  cropBoxToDataUrl,
+  cropCutoutsFromSheet,
+  cropLooseSuppliesFromImage,
+  extractPaperSwatches,
+  normalizeImageDataUrl,
+} from "@/lib/contourCutter";
 import { CANVAS_SIZE_MM, MAX_PHOTO_AREA_PCT, compileLayoutToSvg, injectAssetsIntoSvg, upsertCutoutInLayout } from "@/lib/svgCompiler";
 
-const DEFAULT_LAYOUT_PROMPT = "Arrange my photos nicely and place the Together title and floral cutouts around them.";
+const DEFAULT_LAYOUT_PROMPT = "Arrange my photos cleanly with balanced mats, title/corner embellishment clusters, and washi tape accents.";
 const DEFAULT_ANALYZE_PROMPT = "Analyze my photos and recommend a scrapbook theme & cardstock palette.";
 
 async function postGenerate(payload) {
@@ -94,10 +101,39 @@ export default function Home() {
       setSupplyImage(normalized);
       const step1 = await postGenerate({ action: "locate_sheet_and_papers", supplyImage: normalized });
       if (step1.usedModel) setActiveModelBadge(step1.usedModel);
-      const cleanSheet = await cropBoxToDataUrl(normalized, step1.sheet_box_2d || [50, 100, 850, 700]);
-      const step2 = await postGenerate({ action: "detect_stickers_on_sheet", sheetOnlyImage: cleanSheet });
-      const cutouts = await cropCutoutsFromSheet(cleanSheet, step2.cutouts || []);
-      setInventory({ theme: step1.theme || "Scrapbook Page", papers: step1.papers || [], cutouts });
+
+      const sheets = step1.sticker_sheets?.length
+        ? step1.sticker_sheets
+        : step1.sheet_box_2d
+        ? [{ id: "sheet_1", label: "Sticker Sheet 1", box_2d: step1.sheet_box_2d }]
+        : [];
+
+      const [papers, sheetBatches, looseCutouts] = await Promise.all([
+        extractPaperSwatches(normalized, step1.papers || []),
+        Promise.all(
+          sheets.map(async (sheet) => {
+            const cleanSheet = await cropBoxToDataUrl(normalized, sheet.box_2d);
+            const step2 = await postGenerate({ action: "detect_stickers_on_sheet", sheetOnlyImage: cleanSheet });
+            return { cleanSheet, rawCutouts: step2.cutouts || [] };
+          })
+        ),
+        cropLooseSuppliesFromImage(normalized, step1.loose_supplies || [], 1),
+      ]);
+
+      const sheetCutoutsAll = [];
+      for (const batch of sheetBatches) {
+        const cropped = await cropCutoutsFromSheet(
+          batch.cleanSheet,
+          batch.rawCutouts,
+          "sticker",
+          sheetCutoutsAll.length + 1
+        );
+        sheetCutoutsAll.push(...cropped);
+      }
+
+      const washiCutouts = await buildWashiTapeItems(normalized, step1.washi_tapes || [], papers);
+      const cutouts = [...sheetCutoutsAll, ...looseCutouts, ...washiCutouts];
+      setInventory({ theme: step1.theme || "Scrapbook Page", papers, cutouts });
       setSuppliesUnlocked(true);
     });
   };
@@ -157,7 +193,17 @@ export default function Home() {
     setInput("");
     const fallbackPapers = themeRecommendation?.recommended_palette?.map((p, idx) => ({ id: `paper_${idx + 1}`, ...p }));
     const extractedInventory = inventory
-      ? { theme: inventory.theme, papers: inventory.papers, cutouts: inventory.cutouts.map(({ id, label, category, item_type, width_mm, height_mm }) => ({ id, label, category, item_type: item_type || "sticker", width_mm, height_mm })) }
+      ? {
+          theme: inventory.theme,
+          papers: (inventory.papers || []).map(({ id, name, color_name, hex, secondary_hex, pattern_type, role }) => ({
+            id, name, color_name, hex, secondary_hex, pattern_type, role,
+          })),
+          cutouts: (inventory.cutouts || []).map(({
+            id, source_id, label, category, item_type, width_mm, height_mm, color_name, primary_hex, secondary_hex, pattern_type,
+          }) => ({
+            id, source_id, label, category, item_type: item_type || "sticker", width_mm, height_mm, color_name, primary_hex, secondary_hex, pattern_type,
+          })),
+        }
       : fallbackPapers?.length ? { theme: themeRecommendation.theme, papers: fallbackPapers, cutouts: [] } : null;
     runAsync(setLoading, async () => {
       const data = await postGenerate({ action: "generate_layout", messages: newMessages, currentLayout: currentLayoutObj ? JSON.stringify(currentLayoutObj) : null, photos: photos.map(({ id, w_in, h_in, label }) => ({ id, w_in, h_in, label })), extractedInventory });
@@ -218,7 +264,7 @@ export default function Home() {
       />
       <CanvasStage
         viewMode={viewMode} onViewModeChange={setViewMode} loading={loading}
-        renderedSvg={injectAssetsIntoSvg(rawSvg, photos, inventory?.cutouts || [], viewMode)}
+        renderedSvg={injectAssetsIntoSvg(rawSvg, photos, inventory?.cutouts || [], viewMode, inventory?.papers || [])}
         currentLayout={currentLayoutObj} onUpdateLayout={handleLayoutChange} onDropInventoryItem={handleDropInventoryItem}
         onStarLayout={handleStarLayout} starringLayout={starringLayout} starredCount={starredCount} isCurrentStarred={isCurrentStarred}
       />

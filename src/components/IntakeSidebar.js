@@ -120,9 +120,10 @@ export default function IntakeSidebar({
           {themeRecommendation.recommended_palette?.length > 0 && (
             <div className="flex flex-wrap items-center gap-1.5 mb-1">
               {themeRecommendation.recommended_palette.map((c, idx) => (
-                <div key={idx} className="flex items-center gap-1 bg-neutral-900/80 px-1.5 py-0.5 rounded border border-neutral-800">
-                  <span className="w-3 h-3 rounded-sm border border-white/20" style={{ backgroundColor: c.hex }} />
-                  <span className="text-[10px] text-neutral-300">{c.name}</span>
+                <div key={idx} className="flex items-center gap-1.5 bg-neutral-900/80 px-1.5 py-0.5 rounded border border-neutral-800">
+                  <span className="w-3 h-3 rounded-sm border border-white/20 shrink-0" style={{ backgroundColor: c.hex }} />
+                  <span className="text-[10px] text-neutral-200">{c.name}</span>
+                  <span className="text-[10px] font-mono text-neutral-400">{c.hex}</span>
                 </div>
               ))}
             </div>
@@ -153,7 +154,7 @@ export default function IntakeSidebar({
           </div>
           {scanningSupplies && (
             <p className="text-[11px] text-purple-300 mt-2 animate-pulse">
-              Stage 1: Isolating sticker sheet from table... Stage 2: Contour-cutting real stickers...
+              Stage 1: Scanning cardstock swatches, sheets, loose tags &amp; tape... Stage 2: Cutting individual embellishments...
             </p>
           )}
         </div>

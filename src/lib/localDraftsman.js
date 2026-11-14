@@ -71,21 +71,9 @@ export function resolveClusterAnchors(objects = []) {
     }
 
     const clusterKey = `${target.id}:${obj.anchor_zone}`;
-    const clusterIdx = clusterCounts.get(clusterKey) || 0;
-    clusterCounts.set(clusterKey, clusterIdx + 1);
-
+    const isCorner = obj.anchor_zone.startsWith('overlap_');
     const t = getOuterDims(target);
     const s = getOuterDims(obj);
-    const fanOffsets = {
-      overlap_top_left: [[0, 0], [22, -4], [-6, 22]],
-      overlap_top_right: [[0, 0], [-22, -4], [6, 22]],
-      overlap_bottom_left: [[0, 0], [22, 4], [-6, -22]],
-      overlap_bottom_right: [[0, 0], [-22, 4], [6, -22]],
-      above: [[0, 0], [26, 0], [-26, 0]],
-      below: [[0, 0], [26, 0], [-26, 0]],
-      left: [[0, 0], [0, 22], [0, -22]],
-      right: [[0, 0], [0, 22], [0, -22]],
-    };
     const baseCenters = {
       overlap_top_left: [target.center_x - t.w / 2, target.center_y - t.h / 2],
       overlap_top_right: [target.center_x + t.w / 2, target.center_y - t.h / 2],
@@ -100,14 +88,37 @@ export function resolveClusterAnchors(objects = []) {
     const base = baseCenters[obj.anchor_zone];
     const updated = { ...obj };
     if (base) {
-      const fanList = fanOffsets[obj.anchor_zone] || [[0, 0]];
-      const [fx, fy] = fanList[clusterIdx] || [
-        (clusterIdx % 2 === 0 ? -1 : 1) * (16 + clusterIdx * 6),
-        14 * clusterIdx,
-      ];
-      updated.center_x = Number((base[0] + fx).toFixed(1));
-      updated.center_y = Number((base[1] + fy).toFixed(1));
-      updated._clustered = true;
+      if (obj.type === 'washi_tape' && isCorner) {
+        updated.center_x = Number(base[0].toFixed(1));
+        updated.center_y = Number(base[1].toFixed(1));
+        if (!updated.rotation_degrees) {
+          updated.rotation_degrees =
+            obj.anchor_zone === 'overlap_top_left' || obj.anchor_zone === 'overlap_bottom_right'
+              ? -38
+              : 38;
+        }
+      } else {
+        const clusterIdx = clusterCounts.get(clusterKey) || 0;
+        clusterCounts.set(clusterKey, clusterIdx + 1);
+        const fanOffsets = {
+          overlap_top_left: [[0, 0], [22, -4], [-6, 22]],
+          overlap_top_right: [[0, 0], [-22, -4], [6, 22]],
+          overlap_bottom_left: [[0, 0], [22, 4], [-6, -22]],
+          overlap_bottom_right: [[0, 0], [-22, 4], [6, -22]],
+          above: [[0, 0], [26, 0], [-26, 0]],
+          below: [[0, 0], [26, 0], [-26, 0]],
+          left: [[0, 0], [0, 22], [0, -22]],
+          right: [[0, 0], [0, 22], [0, -22]],
+        };
+        const fanList = fanOffsets[obj.anchor_zone] || [[0, 0]];
+        const [fx, fy] = fanList[clusterIdx] || [
+          (clusterIdx % 2 === 0 ? -1 : 1) * (16 + clusterIdx * 6),
+          14 * clusterIdx,
+        ];
+        updated.center_x = Number((base[0] + fx).toFixed(1));
+        updated.center_y = Number((base[1] + fy).toFixed(1));
+        updated._clustered = true;
+      }
     }
     delete updated.anchor_to;
     delete updated.anchor_zone;
@@ -161,7 +172,7 @@ export function resolveInitialCollisions(layout) {
 
   const placedStickers = [];
   layout.objects
-    .filter((o) => o.type !== 'photo_mat')
+    .filter((o) => o.type !== 'photo_mat' && o.type !== 'washi_tape')
     .forEach((obj) => {
       const isClustered = Boolean(obj._clustered);
       delete obj._clustered;
@@ -202,9 +213,16 @@ For relative placement, output "relative_to": "<target_id>" and "position": "abo
 ONLY use exact IDs from CURRENT OBJECTS or AVAILABLE INVENTORY CUTOUTS.
 Output pure JSON: { "updates": [{ "id": "string", "center_x": float, "center_y": float, "rotation_degrees": integer, "mat_color": "string (optional)", "relative_to": "string (optional)", "position": "string (optional)", "gap_mm": float }] }`;
 
-  const catalogBrief = availableCutouts.map(({ id, label, item_type, width_mm, height_mm }) => ({
-    id, label, item_type, width_mm, height_mm,
-  }));
+  const catalogBrief = availableCutouts.map(
+    ({ id, label, item_type, width_mm, height_mm, color_name, primary_hex, pattern_type }) => ({
+      id,
+      label,
+      item_type,
+      width_mm,
+      height_mm,
+      ...(item_type === 'washi_tape' ? { color_name, primary_hex, pattern_type } : {}),
+    })
+  );
   const rawPatch = await callOllama([
     { role: 'system', content: patchPrompt },
     { role: 'user', content: `CURRENT OBJECTS:\n${JSON.stringify(existingLayout.objects, null, 2)}\n\nAVAILABLE INVENTORY CUTOUTS:\n${JSON.stringify(catalogBrief, null, 2)}\n\nCOMMAND: ${lastUserMessage}` },
@@ -216,16 +234,26 @@ Output pure JSON: { "updates": [{ "id": "string", "center_x": float, "center_y":
       if (!existingLayout.objects.some((o) => o.id === u.id)) {
         const inv = availableCutouts.find((c) => c.id === u.id);
         if (inv) {
+          const isWashi = inv.item_type === 'washi_tape';
           existingLayout.objects.push({
             id: inv.id,
-            type: inv.item_type === 'cut_svg' ? 'cut_svg' : 'sticker',
+            type: isWashi ? 'washi_tape' : inv.item_type === 'cut_svg' ? 'cut_svg' : 'sticker',
             label: inv.label,
-            width_mm: inv.width_mm || 50,
-            height_mm: inv.height_mm || 50,
+            width_mm: inv.width_mm || (isWashi ? 48 : 50),
+            height_mm: inv.height_mm || (isWashi ? 12 : 50),
+            ...(isWashi
+              ? {
+                  source_id: inv.source_id || inv.id,
+                  color_name: inv.color_name || inv.label,
+                  primary_hex: inv.primary_hex || '#9E222B',
+                  secondary_hex: inv.secondary_hex || '#C2B29C',
+                  pattern_type: inv.pattern_type || 'solid',
+                }
+              : {}),
             center_x: u.center_x || 152.4,
             center_y: u.center_y || 152.4,
-            rotation_degrees: u.rotation_degrees || 0,
-            z_index: 10,
+            rotation_degrees: u.rotation_degrees ?? (isWashi ? -35 : 0),
+            z_index: isWashi ? 14 : 10,
           });
         }
       }
@@ -255,11 +283,25 @@ async function createInitialLayout(photos, availableCutouts, baseCanvasHex, matP
   }));
   const stickerCatalog = availableCutouts.map((c) => ({
     id: c.id,
-    type: c.item_type === 'cut_svg' ? 'cut_svg' : 'sticker',
+    type:
+      c.item_type === 'washi_tape'
+        ? 'washi_tape'
+        : c.item_type === 'cut_svg'
+        ? 'cut_svg'
+        : 'sticker',
     label: c.label,
     category: c.category,
-    width_mm: c.width_mm || 55,
-    height_mm: c.height_mm || 35,
+    width_mm: c.width_mm || (c.item_type === 'washi_tape' ? 48 : 55),
+    height_mm: c.height_mm || (c.item_type === 'washi_tape' ? 12 : 35),
+    ...(c.item_type === 'washi_tape'
+      ? {
+          source_id: c.source_id || c.id,
+          color_name: c.color_name || c.label,
+          primary_hex: c.primary_hex || '#9E222B',
+          secondary_hex: c.secondary_hex || '#C2B29C',
+          pattern_type: c.pattern_type || 'solid',
+        }
+      : {}),
   }));
 
   const { examples: starredExamples } = await getMatchingStarredLayouts(photos, 3);
@@ -319,15 +361,27 @@ Schema: { "archetype": "string", "design_notes": "string", "objects": [{ "id": "
       });
       return;
     }
-    const match = stickerCatalog.find((sc) => sc.id === obj.id);
-    if (match && !validObjects.some((v) => v.id === match.id)) {
+    const match = stickerCatalog.find((sc) => sc.id === obj.id || sc.source_id === obj.id);
+    const alreadyPlaced = validObjects.some((v) => v.id === obj.id);
+    if (match && (!alreadyPlaced || match.type === 'washi_tape')) {
+      const resolvedId = alreadyPlaced ? `${match.id}_strip_${validObjects.length}` : match.id;
       validObjects.push({
         ...obj,
+        id: resolvedId,
         type: match.type,
         label: match.label,
-        width_mm: match.width_mm,
-        height_mm: match.height_mm,
-        z_index: obj.z_index || 10,
+        width_mm: obj.width_mm || match.width_mm,
+        height_mm: obj.height_mm || match.height_mm,
+        ...(match.type === 'washi_tape'
+          ? {
+              source_id: match.source_id || match.id,
+              color_name: match.color_name,
+              primary_hex: match.primary_hex,
+              secondary_hex: match.secondary_hex,
+              pattern_type: match.pattern_type,
+            }
+          : {}),
+        z_index: obj.z_index || (match.type === 'washi_tape' ? 14 : 10),
       });
     }
   });

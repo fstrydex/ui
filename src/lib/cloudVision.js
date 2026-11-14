@@ -15,6 +15,34 @@ function createHttpError(message, status = 500) {
   return err;
 }
 
+export function unwrapJsonArray(raw, preferredKeys = []) {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === 'object') {
+    for (const key of preferredKeys) {
+      if (Array.isArray(raw[key])) return raw[key];
+    }
+    const firstArr = Object.values(raw).find((v) => Array.isArray(v));
+    if (Array.isArray(firstArr)) return firstArr;
+  }
+  return [];
+}
+
+export function normalizeHex(hex, fallback = '#D8C9B4') {
+  if (typeof hex !== 'string') return fallback;
+  const cleaned = hex.trim().replace(/^#/, '');
+  if (/^[0-9a-fA-F]{6}$/.test(cleaned)) {
+    return `#${cleaned.toUpperCase()}`;
+  }
+  if (/^[0-9a-fA-F]{3}$/.test(cleaned)) {
+    const expanded = cleaned
+      .split('')
+      .map((c) => c + c)
+      .join('');
+    return `#${expanded.toUpperCase()}`;
+  }
+  return fallback;
+}
+
 export function dataUrlToPart(dataUrl, fallbackMime = 'image/jpeg') {
   const matches = dataUrl.match(/^data:(image\/[a-zA-Z0-9+.-]+);base64,(.+)$/);
   const mimeType = matches ? matches[1] : fallbackMime;
@@ -74,23 +102,31 @@ export async function analyzePhotosForTheme(photos = []) {
 
   const imageParts = realPhotos.map((p) => dataUrlToPart(p.dataUrl, 'image/jpeg'));
   const prompt = `Examine these user scrapbook photos carefully.
-Suggest an evocative scrapbook page theme, a coordinated 3-color cardstock palette (1 base_canvas and 2 photo_mat colors with hex codes that complement the photos' lighting, tones, and subject), and a concise 1-2 sentence summary explaining why this palette fits the photos.
+Suggest an evocative scrapbook page theme, a coordinated 3-color cardstock palette (1 base_canvas and 2 photo_mat colors with BOTH descriptive color names and accurate #RRGGBB hex codes that complement the photos' lighting, tones, and subject), and a concise 1-2 sentence summary explaining why this palette fits the photos.
 
 Return pure JSON:
 {
   "theme": "Short evocative theme title",
   "recommended_palette": [
-    { "name": "Color Name", "hex": "#1F324C", "role": "base_canvas" },
-    { "name": "Color Name", "hex": "#A4C6D8", "role": "photo_mat" },
-    { "name": "Color Name", "hex": "#F4F1E6", "role": "photo_mat" }
+    { "name": "Deep Navy Blue", "hex": "#1F324C", "role": "base_canvas" },
+    { "name": "Dusty Sky Blue", "hex": "#A4C6D8", "role": "photo_mat" },
+    { "name": "Warm Ivory Cream", "hex": "#F4F1E6", "role": "photo_mat" }
   ],
   "summary": "Brief explanation of the mood and color pairing."
 }`;
 
   const { data, usedModel } = await callGeminiJson(prompt, imageParts, 0.2);
+  const palette = Array.isArray(data?.recommended_palette)
+    ? data.recommended_palette.map((c, idx) => ({
+        name: c?.name || `Palette Color ${idx + 1}`,
+        hex: normalizeHex(c?.hex, idx === 0 ? '#24344D' : '#F2EFE4'),
+        role: c?.role || (idx === 0 ? 'base_canvas' : 'photo_mat'),
+      }))
+    : [];
+
   return {
     theme: data?.theme || 'Timeless Memories',
-    recommended_palette: Array.isArray(data?.recommended_palette) ? data.recommended_palette : [],
+    recommended_palette: palette,
     summary: data?.summary || 'Recommended palette matched to your uploaded photos.',
     usedModel,
   };
@@ -102,23 +138,126 @@ export async function locateSheetAndPapers(supplyImage) {
   }
 
   const imagePart = dataUrlToPart(supplyImage, 'image/jpeg');
-  const locatePrompt = `Examine this overhead photo of scrapbooking supplies on a table.
-1. Find the exact 2D bounding box of ONLY the white/cream sticker sheet ("sheet_box_2d": [ymin, xmin, ymax, xmax] scaled 0..1000), excluding the wooden table and excluding the blue/navy cardstock sticking out on the right/bottom.
-2. Identify the background cardstock and patterned paper sheets ("papers") with accurate hex codes.
+  const locatePrompt = `Examine this overhead flat-lay photo of scrapbooking supplies on a table carefully and systematically.
+Coordinates [ymin, xmin, ymax, xmax] must be scaled 0..1000 relative to the full image.
+
+1. CARDSTOCK & PATTERNED PAPERS ("papers"):
+   Scan across the fanned stack from left to right and top to bottom so you catch EVERY distinct sheet (solid, textured, speckled, plaid, striped, or printed — typically 4 to 8 sheets).
+   For EACH distinct paper sheet, return:
+   - "name": Full paper name (e.g. "Crimson Red Textured Cardstock", "Tan & Red Tartan Plaid Paper")
+   - "color_name": Descriptive color name (e.g. "Crimson Red", "Warm Oatmeal Cream", "Tan & Crimson Plaid")
+   - "hex": Accurate primary #RRGGBB color code
+   - "secondary_hex": Secondary/accent #RRGGBB hex code (especially important for plaid, speckled, striped, or patterned papers; null if solid)
+   - "pattern_type": "solid" | "textured" | "plaid" | "speckled" | "striped" | "floral"
+   - "role": "base_canvas" | "photo_mat"
+   - "sample_box_2d": [ymin, xmin, ymax, xmax] pointing to an UNOBSTRUCTED, clean visible patch of THAT specific paper (no stickers, tags, or table overlapping inside this box!).
+
+2. STICKER & DIE-CUT BACKING SHEETS ("sticker_sheets"):
+   Find ALL white/cream backing sheets holding multiple stickers or die-cuts (there may be 1, 2, or more separate sheets!). Exclude the table surface.
+
+3. LOOSE PHYSICAL SUPPLIES ("loose_supplies"):
+   Find standalone physical embellishments sitting loose on the cardstock or table OUTSIDE the sticker backing sheets and NOT tape rolls:
+   - Luggage/kraft tags (category: "tag")
+   - Lined prompt/journaling cards (category: "journal_card")
+   - Mini envelopes (category: "envelope")
+   - Chipboard word blocks/strips (category: "chipboard")
+   - Loose round wax-seal/badge tokens (category: "badge")
+   Keep each "box_2d" tight around the individual loose item.
+
+4. WASHI TAPE ROLLS ("washi_tapes"):
+   Find any coiled washi tape rolls visible in the photo. For each roll, identify its descriptive "color_name", "primary_hex", "secondary_hex", "pattern_type" ("solid"|"plaid"|"striped"|"speckled"|"polka"), full roll "box_2d", and "sample_box_2d" on the colored/patterned tape rim.
 
 Return pure JSON:
 {
-  "theme": "Romantic / Wedding",
-  "sheet_box_2d": [82, 125, 835, 675],
+  "theme": "Evocative Kit Theme",
   "papers": [
-    { "id": "paper_1", "name": "Navy Blue Cardstock", "hex": "#24344D", "role": "base_canvas" },
-    { "id": "paper_2", "name": "Light Blue Patterned Paper", "hex": "#A8C8D4", "role": "photo_mat" },
-    { "id": "paper_3", "name": "Warm Cream Cardstock", "hex": "#F2EFE4", "role": "photo_mat" }
+    {
+      "id": "paper_1",
+      "name": "Crimson Red Textured Cardstock",
+      "color_name": "Crimson Red",
+      "hex": "#9E222B",
+      "secondary_hex": null,
+      "pattern_type": "textured",
+      "role": "base_canvas",
+      "sample_box_2d": [320, 20, 460, 85]
+    }
+  ],
+  "sticker_sheets": [
+    { "id": "sheet_1", "label": "Main Sticker Sheet", "box_2d": [250, 140, 845, 505] }
+  ],
+  "loose_supplies": [
+    { "id": "supply_1", "label": "Kraft Twine Tag", "category": "tag", "box_2d": [410, 780, 630, 920] }
+  ],
+  "washi_tapes": [
+    {
+      "id": "tape_1",
+      "label": "Crimson Red Washi Tape",
+      "color_name": "Crimson Red",
+      "primary_hex": "#9E222B",
+      "secondary_hex": "#7A1820",
+      "pattern_type": "solid",
+      "box_2d": [770, 745, 925, 860],
+      "sample_box_2d": [815, 760, 875, 805]
+    }
   ]
 }`;
 
   const { data, usedModel } = await callGeminiJson(locatePrompt, imagePart, 0.1);
-  return { ...data, usedModel };
+
+  const papers = unwrapJsonArray(data?.papers, ['papers']).map((p, idx) => ({
+    id: p?.id || `paper_${idx + 1}`,
+    name: p?.name || p?.color_name || `Cardstock ${idx + 1}`,
+    color_name: p?.color_name || p?.name || `Color ${idx + 1}`,
+    hex: normalizeHex(p?.hex, idx === 0 ? '#24344D' : '#F2EFE4'),
+    secondary_hex: p?.secondary_hex ? normalizeHex(p.secondary_hex, null) : null,
+    pattern_type: p?.pattern_type || 'solid',
+    role: p?.role || (idx === 0 ? 'base_canvas' : 'photo_mat'),
+    sample_box_2d: Array.isArray(p?.sample_box_2d) && p.sample_box_2d.length === 4 ? p.sample_box_2d : null,
+  }));
+
+  const rawSheets = unwrapJsonArray(data?.sticker_sheets, ['sticker_sheets', 'sheets']);
+  const sticker_sheets =
+    rawSheets.length > 0
+      ? rawSheets
+          .filter((s) => Array.isArray(s?.box_2d) && s.box_2d.length === 4)
+          .map((s, idx) => ({
+            id: s.id || `sheet_${idx + 1}`,
+            label: s.label || `Sticker Sheet ${idx + 1}`,
+            box_2d: s.box_2d,
+          }))
+      : Array.isArray(data?.sheet_box_2d) && data.sheet_box_2d.length === 4
+      ? [{ id: 'sheet_1', label: 'Sticker Sheet 1', box_2d: data.sheet_box_2d }]
+      : [];
+
+  const loose_supplies = unwrapJsonArray(data?.loose_supplies, ['loose_supplies', 'ephemera', 'supplies'])
+    .filter((item) => Array.isArray(item?.box_2d) && item.box_2d.length === 4)
+    .map((item, idx) => ({
+      id: item.id || `supply_${idx + 1}`,
+      label: item.label || `Supply ${idx + 1}`,
+      category: item.category || 'motif',
+      box_2d: item.box_2d,
+    }));
+
+  const washi_tapes = unwrapJsonArray(data?.washi_tapes, ['washi_tapes', 'tapes']).map((t, idx) => ({
+    id: t?.id || `tape_${idx + 1}`,
+    label: t?.label || `${t?.color_name || 'Washi'} Tape`,
+    color_name: t?.color_name || t?.label || `Washi Color ${idx + 1}`,
+    primary_hex: normalizeHex(t?.primary_hex || t?.hex, papers[0]?.hex || '#9E222B'),
+    secondary_hex: t?.secondary_hex ? normalizeHex(t.secondary_hex, '#C2B29C') : null,
+    pattern_type: t?.pattern_type || 'solid',
+    box_2d: Array.isArray(t?.box_2d) && t.box_2d.length === 4 ? t.box_2d : null,
+    sample_box_2d: Array.isArray(t?.sample_box_2d) && t.sample_box_2d.length === 4 ? t.sample_box_2d : null,
+  }));
+
+  return {
+    theme: data?.theme || 'Scrapbook Page',
+    sheet_box_2d: sticker_sheets[0]?.box_2d || [50, 100, 850, 700],
+    sticker_sheets,
+    papers,
+    loose_supplies,
+    washi_tapes,
+    usedModel,
+  };
 }
 
 export async function detectStickersOnSheet(sheetOnlyImage) {
@@ -127,40 +266,48 @@ export async function detectStickersOnSheet(sheetOnlyImage) {
   }
 
   const imagePart = dataUrlToPart(sheetOnlyImage, 'image/jpeg');
-  const boxPrompt = `This image is a cropped view of a single scrapbook sticker sheet.
-Detect 8 to 10 distinct, well-separated individual stickers on this sheet:
-- The cursive "together" script word
-- The "Happily ever after" framed square sticker
-- The dark "The best is yet to come..." rectangle
-- An individual 5-petal cream/tan flower blossom (pick ONE single flower, not a group)
-- An individual dark line-art botanical leafy stem (pick ONE single stem)
-- The "adore you" round sticker
-- The dark floral heart sticker
-- The "this is us" or "best day ever" dark top banner
+  const boxPrompt = `This image is a cropped view of a single scrapbook sticker or die-cut backing sheet.
+Detect ALL distinct, well-separated individual stickers or die-cuts visible on this sheet (up to 24 items) regardless of theme:
+- Word titles, quotes, and sentiment strips
+- Ribbon banners and pennants / bunting flags
+- Illustrations, wildlife, animals, florals, botanicals, stars, or scenic icons
+- Badges, seals, frames, scalloped tags, compasses, and arrows
+- Ignore sheet header branding text like "Scrapbook Supplies" along the top header margin if it is part of the packaging header rather than a peelable sticker.
 
 CRITICAL BOUNDING BOX RULES:
 - Coordinates [ymin, xmin, ymax, xmax] are scaled 0 to 1000 relative to THIS cropped sheet image.
-- Keep each box tight around that single sticker so neighboring stickers do not bleed into the box!
+- Keep each box tight around that single sticker/die-cut so neighboring items do not bleed into the box!
 
-Return a pure JSON array:
-[
-  { "box_2d": [ymin, xmin, ymax, xmax], "label": "descriptive name", "category": "title|floral|banner|heart|tag", "ink_type": "dark_or_floral" }
-]`;
+Return pure JSON:
+{
+  "cutouts": [
+    {
+      "box_2d": [ymin, xmin, ymax, xmax],
+      "label": "descriptive name (e.g. 'Adventure Awaits Bison' or 'Crimson Bunting Flag')",
+      "category": "title|banner|motif|tag|flag|badge|floral|arrow"
+    }
+  ]
+}`;
 
   const { data: rawBoxes, usedModel } = await callGeminiJson(boxPrompt, imagePart, 0.05);
-  const cutouts = (Array.isArray(rawBoxes) ? rawBoxes : []).slice(0, 10).map((item, idx) => {
-    const [ymin, xmin, ymax, xmax] = item.box_2d || [100, 100, 250, 250];
-    const estW = Math.max(24, Math.min(125, Math.round(((xmax - xmin) / 1000) * 304.8)));
-    const estH = Math.max(18, Math.min(105, Math.round(((ymax - ymin) / 1000) * 304.8)));
-    return {
-      id: `sticker_${idx + 1}`,
-      label: item.label || `Sticker ${idx + 1}`,
-      category: item.category || 'motif',
-      box_2d: [ymin, xmin, ymax, xmax],
-      width_mm: estW,
-      height_mm: estH,
-    };
-  });
+  const parsedList = unwrapJsonArray(rawBoxes, ['cutouts', 'stickers', 'items', 'boxes', 'results']);
+
+  const cutouts = parsedList
+    .filter((item) => Array.isArray(item?.box_2d) && item.box_2d.length === 4)
+    .slice(0, 24)
+    .map((item, idx) => {
+      const [ymin, xmin, ymax, xmax] = item.box_2d;
+      const estW = Math.max(22, Math.min(115, Math.round(((xmax - xmin) / 1000) * 210)));
+      const estH = Math.max(16, Math.min(105, Math.round(((ymax - ymin) / 1000) * 240)));
+      return {
+        id: `sticker_${idx + 1}`,
+        label: item.label || `Sticker ${idx + 1}`,
+        category: item.category || 'motif',
+        box_2d: [ymin, xmin, ymax, xmax],
+        width_mm: estW,
+        height_mm: estH,
+      };
+    });
 
   return { cutouts, usedModel };
 }
@@ -211,7 +358,9 @@ USER REQUEST: ${userRequest}
 COMPOSITION RULES:
 1. PHOTO FOCAL BLOCK: Place EVERY photo from LOCKED PHOTO INVENTORY using balanced scrapbook archetypes (Diagonal Counterbalance, Centered Story Pair, Hero + Supporting Accent, or Asymmetric Triangle). Use subtle -3 to 3 degree tilts and leave at least 12mm breathing room between photo mats. Never alter photo_width or photo_height.
 2. TITLE ANCHOR: Pick 1 "title" or "banner" sticker (if available) and anchor it in the primary open counter-space (e.g., anchor_zone "above", "below", "left", or "right" of a photo) at z_index 15.
-3. VISUAL TRIANGLE & CORNER CLUSTERS: Never scatter embellishments randomly in open space! Group 3 to 6 items from AVAILABLE INVENTORY CUTOUTS (floral, heart, tag, stem, motif) into 2 or 3 tight corner clusters anchored to photo corners using "anchor_to": "<photo_id>" and "anchor_zone": "overlap_top_left" | "overlap_top_right" | "overlap_bottom_left" | "overlap_bottom_right" | "above" | "below" | "left" | "right".
+3. VISUAL TRIANGLE, CORNER CLUSTERS & WASHI TAPE: Never scatter embellishments randomly in open space!
+   - Group 3 to 6 items from AVAILABLE INVENTORY CUTOUTS (floral, heart, tag, journal_card, envelope, chipboard, badge, motif) into 2 or 3 tight corner clusters anchored to photo corners using "anchor_to": "<photo_id>" and "anchor_zone": "overlap_top_left" | "overlap_top_right" | "overlap_bottom_left" | "overlap_bottom_right" | "above" | "below" | "left" | "right".
+   - If "washi_tape" items are present in AVAILABLE INVENTORY CUTOUTS, place 1 or 2 diagonal washi tape strips across opposite photo corners ("anchor_zone": "overlap_top_left" / "overlap_top_right" / "overlap_bottom_left" / "overlap_bottom_right", "rotation_degrees": -38 or 38, "z_index": 14) to visually tape the photos onto the mat!
 4. ONLY use exact IDs from LOCKED PHOTO INVENTORY and AVAILABLE INVENTORY CUTOUTS.
 
 LOCKED PHOTO INVENTORY:
