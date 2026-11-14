@@ -24,12 +24,18 @@ export function dataUrlToPart(dataUrl, fallbackMime = 'image/jpeg') {
   return { inlineData: { data: base64Data, mimeType } };
 }
 
-export async function callGeminiJson(prompt, imageParts, temperature = 0.1) {
+export async function callGeminiJson(prompt, imageParts = [], temperature = 0.1) {
   if (!process.env.GEMINI_API_KEY) {
     throw createHttpError('GEMINI_API_KEY is missing in .env.local', 500);
   }
 
-  const parts = Array.isArray(imageParts) ? [prompt, ...imageParts] : [prompt, imageParts];
+  const parts = !imageParts
+    ? [prompt]
+    : Array.isArray(imageParts)
+    ? imageParts.length > 0
+      ? [prompt, ...imageParts]
+      : [prompt]
+    : [prompt, imageParts];
   let lastErr = null;
 
   for (const modelName of VISION_MODEL_CASCADE) {
@@ -183,4 +189,64 @@ Return pure JSON:
 
   const { data: parsedVector, usedModel } = await callGeminiJson(vectorPrompt, imagePart, 0.15);
   return { vector: parsedVector, usedModel };
+}
+
+export async function designInitialLayoutWithCloud({
+  lockedPhotos = [],
+  stickerCatalog = [],
+  baseCanvasHex = '#24344D',
+  theme = 'Scrapbook Page',
+  userRequest = 'Design a balanced scrapbook page.',
+  starredExamples = [],
+}) {
+  const examplesBlock =
+    starredExamples.length > 0
+      ? `\nSTARRED REFERENCE LAYOUTS (Learn from these human-approved compositions):\n${JSON.stringify(starredExamples, null, 2)}`
+      : '';
+
+  const prompt = `You are a Master Scrapbook Art Director designing a 304.8mm x 304.8mm (12x12") layout (origin (0,0) top-left, 15.0mm outer safety margin).
+THEME: ${theme} | BASE CARDSTOCK: ${baseCanvasHex}
+USER REQUEST: ${userRequest}
+
+COMPOSITION RULES:
+1. PHOTO FOCAL BLOCK: Place EVERY photo from LOCKED PHOTO INVENTORY using balanced scrapbook archetypes (Diagonal Counterbalance, Centered Story Pair, Hero + Supporting Accent, or Asymmetric Triangle). Use subtle -3 to 3 degree tilts and leave at least 12mm breathing room between photo mats. Never alter photo_width or photo_height.
+2. TITLE ANCHOR: Pick 1 "title" or "banner" sticker (if available) and anchor it in the primary open counter-space (e.g., anchor_zone "above", "below", "left", or "right" of a photo) at z_index 15.
+3. VISUAL TRIANGLE & CORNER CLUSTERS: Never scatter embellishments randomly in open space! Group 3 to 6 items from AVAILABLE INVENTORY CUTOUTS (floral, heart, tag, stem, motif) into 2 or 3 tight corner clusters anchored to photo corners using "anchor_to": "<photo_id>" and "anchor_zone": "overlap_top_left" | "overlap_top_right" | "overlap_bottom_left" | "overlap_bottom_right" | "above" | "below" | "left" | "right".
+4. ONLY use exact IDs from LOCKED PHOTO INVENTORY and AVAILABLE INVENTORY CUTOUTS.
+
+LOCKED PHOTO INVENTORY:
+${JSON.stringify(lockedPhotos, null, 2)}
+
+AVAILABLE INVENTORY CUTOUTS:
+${JSON.stringify(stickerCatalog, null, 2)}
+${examplesBlock}
+
+Return pure JSON:
+{
+  "archetype": "Name of composition archetype used",
+  "design_notes": "1-sentence explanation of the focal flow and cluster triangle",
+  "objects": [
+    {
+      "id": "photo_1",
+      "type": "photo_mat",
+      "center_x": 95.0,
+      "center_y": 110.0,
+      "rotation_degrees": -2,
+      "z_index": 1
+    },
+    {
+      "id": "sticker_1",
+      "type": "sticker",
+      "anchor_to": "photo_2",
+      "anchor_zone": "above",
+      "center_x": 205.0,
+      "center_y": 62.0,
+      "rotation_degrees": 1,
+      "z_index": 15
+    }
+  ]
+}`;
+
+  const { data, usedModel } = await callGeminiJson(prompt, [], 0.25);
+  return { data, usedModel };
 }

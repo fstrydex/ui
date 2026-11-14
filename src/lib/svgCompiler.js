@@ -49,6 +49,25 @@ function escapeXml(str = '') {
     .replace(/"/g, '&quot;');
 }
 
+function buildObjectControlsSvg(safeId, cx, x, y, outerW) {
+  const rx = x + outerW;
+  return (
+    `    <g class="object-controls">\n` +
+    `      <rect x="${x - 6}" y="${y - 16}" width="${outerW + 12}" height="17" fill="transparent" />\n` +
+    `      <g data-rotate-handle="${safeId}" style="cursor: grab;">\n` +
+    `        <line x1="${cx}" y1="${y}" x2="${cx}" y2="${y - 9}" stroke="#60a5fa" stroke-width="1" />\n` +
+    `        <circle cx="${cx}" cy="${y - 9}" r="5.5" fill="#18181b" stroke="#60a5fa" stroke-width="1.2" />\n` +
+    `        <path d="M ${cx - 2.2} ${y - 9.8} A 2.6 2.6 0 1 1 ${cx - 0.5} ${y - 6.5}" fill="none" stroke="#93c5fd" stroke-width="1.1" stroke-linecap="round" />\n` +
+    `        <polygon points="${cx - 2.8},${y - 11.2} ${cx - 3.2},${y - 8.3} ${cx - 0.8},${y - 9.5}" fill="#93c5fd" />\n` +
+    `      </g>\n` +
+    `      <g data-remove-object="${safeId}" style="cursor: pointer;">\n` +
+    `        <circle cx="${rx}" cy="${y}" r="5.5" fill="#dc2626" stroke="#ffffff" stroke-width="1" />\n` +
+    `        <path d="M ${rx - 2} ${y - 2} L ${rx + 2} ${y + 2} M ${rx + 2} ${y - 2} L ${rx - 2} ${y + 2}" stroke="#ffffff" stroke-width="1.3" stroke-linecap="round" />\n` +
+    `      </g>\n` +
+    `    </g>\n`
+  );
+}
+
 export function compileLayoutToSvg(layout, defaultMatHex = '#F2EFE4') {
   const objects = Array.isArray(layout?.objects) ? layout.objects : [];
   objects.forEach((obj) => clampToMargin(obj));
@@ -68,9 +87,10 @@ export function compileLayoutToSvg(layout, defaultMatHex = '#F2EFE4') {
     const rotation = obj.rotation_degrees || 0;
     const x = cx - outerW / 2;
     const y = cy - outerH / 2;
+    const safeId = escapeXml(obj.id);
     const safeLabel = escapeXml(obj.label || obj.id);
 
-    svg += `  <g id="${escapeXml(obj.id)}" data-draggable="true" transform="rotate(${rotation} ${cx} ${cy})" style="cursor: grab;">\n`;
+    svg += `  <g id="${safeId}" data-draggable="true" transform="rotate(${rotation} ${cx} ${cy})" style="cursor: grab;">\n`;
 
     if (obj.type === 'cut_svg') {
       svg += `    <rect x="${x}" y="${y}" width="${outerW}" height="${outerH}" fill="transparent" />\n`;
@@ -96,6 +116,7 @@ export function compileLayoutToSvg(layout, defaultMatHex = '#F2EFE4') {
       svg += `    <text class="blueprint-layer" x="${cx}" y="${cy}" fill="white" font-family="sans-serif" font-size="10" font-weight="bold" text-anchor="middle" dominant-baseline="middle" transform="rotate(${-rotation} ${cx} ${cy})">Photo #${obj.display_number || 1}</text>\n`;
     }
 
+    svg += buildObjectControlsSvg(safeId, cx, x, y, outerW);
     svg += `  </g>\n`;
   });
 
@@ -123,10 +144,11 @@ export function injectAssetsIntoSvg(rawSvg, photos = [], cutouts = [], viewMode 
     }
   });
 
+  const controlsCss = `.object-controls { opacity: 0; pointer-events: none; transition: opacity 0.12s ease-in-out; } g[data-draggable="true"]:hover .object-controls { opacity: 1; pointer-events: all; }`;
   const modeCss =
     viewMode === 'visual'
-      ? `<style>.blueprint-layer { display: none; }</style>`
-      : `<style>.visual-layer { opacity: 0.18; } .blueprint-layer { display: inline; }</style>`;
+      ? `<style>.blueprint-layer { display: none; } ${controlsCss}</style>`
+      : `<style>.visual-layer { opacity: 0.18; } .blueprint-layer { display: inline; } ${controlsCss}</style>`;
 
   return finalSvg.replace('</defs>', `</defs>${modeCss}`);
 }

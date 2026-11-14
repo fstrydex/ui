@@ -33,6 +33,10 @@ export default function CanvasStage({
   currentLayout,
   onUpdateLayout,
   onDropInventoryItem,
+  onStarLayout,
+  starringLayout,
+  starredCount = 0,
+  isCurrentStarred = false,
 }) {
   const containerRef = useRef(null);
   const dragRef = useRef(null);
@@ -41,6 +45,43 @@ export default function CanvasStage({
 
   const handlePointerDown = (e) => {
     if (!currentLayout?.objects || loading) return;
+
+    const removeBtn = e.target.closest("[data-remove-object]");
+    if (removeBtn) {
+      const removeId = removeBtn.getAttribute("data-remove-object");
+      const nextObjects = currentLayout.objects.filter((o) => o.id !== removeId);
+      onUpdateLayout({ ...currentLayout, objects: nextObjects }, true);
+      e.stopPropagation();
+      e.preventDefault();
+      return;
+    }
+
+    const rotateHandle = e.target.closest("[data-rotate-handle]");
+    if (rotateHandle) {
+      const objId = rotateHandle.getAttribute("data-rotate-handle");
+      const targetObj = currentLayout.objects.find((o) => o.id === objId);
+      if (!targetObj) return;
+
+      const startSvg = clientToSvgCoords(containerRef.current, e.clientX, e.clientY);
+      const startAngle =
+        Math.atan2(startSvg.y - targetObj.center_y, startSvg.x - targetObj.center_x) *
+        (180 / Math.PI);
+      dragRef.current = {
+        mode: "rotate",
+        id: objId,
+        centerX: targetObj.center_x,
+        centerY: targetObj.center_y,
+        startAngle,
+        origRotation: targetObj.rotation_degrees || 0,
+        latestLayout: currentLayout,
+        moved: false,
+      };
+      setDraggingId(objId);
+      containerRef.current?.setPointerCapture?.(e.pointerId);
+      e.preventDefault();
+      return;
+    }
+
     const group = e.target.closest('g[data-draggable="true"][id]');
     if (!group) return;
 
@@ -50,6 +91,7 @@ export default function CanvasStage({
 
     const startSvg = clientToSvgCoords(containerRef.current, e.clientX, e.clientY);
     dragRef.current = {
+      mode: "move",
       id: objId,
       startSvg,
       origX: targetObj.center_x,
@@ -67,19 +109,33 @@ export default function CanvasStage({
     if (!active) return;
 
     const pos = clientToSvgCoords(containerRef.current, e.clientX, e.clientY);
-    const dx = pos.x - active.startSvg.x;
-    const dy = pos.y - active.startSvg.y;
+    let updatedObjects;
 
-    const updatedObjects = active.latestLayout.objects.map((obj) => {
-      if (obj.id !== active.id) return obj;
-      const movedObj = {
-        ...obj,
-        center_x: active.origX + dx,
-        center_y: active.origY + dy,
-      };
-      clampToMargin(movedObj);
-      return movedObj;
-    });
+    if (active.mode === "rotate") {
+      const currentAngle =
+        Math.atan2(pos.y - active.centerY, pos.x - active.centerX) * (180 / Math.PI);
+      const rawRot = active.origRotation + (currentAngle - active.startAngle);
+      let rot = ((((rawRot + 180) % 360) + 360) % 360) - 180;
+      rot = e.shiftKey ? Math.round(rot / 15) * 15 : Math.round(rot);
+
+      updatedObjects = active.latestLayout.objects.map((obj) =>
+        obj.id === active.id ? { ...obj, rotation_degrees: rot } : obj
+      );
+    } else {
+      const dx = pos.x - active.startSvg.x;
+      const dy = pos.y - active.startSvg.y;
+
+      updatedObjects = active.latestLayout.objects.map((obj) => {
+        if (obj.id !== active.id) return obj;
+        const movedObj = {
+          ...obj,
+          center_x: active.origX + dx,
+          center_y: active.origY + dy,
+        };
+        clampToMargin(movedObj);
+        return movedObj;
+      });
+    }
 
     const nextLayout = { ...active.latestLayout, objects: updatedObjects };
     active.latestLayout = nextLayout;
@@ -126,26 +182,45 @@ export default function CanvasStage({
 
   return (
     <div className="flex-1 p-6 flex flex-col items-center justify-center bg-black relative">
-      <div className="flex items-center gap-2 mb-4 bg-neutral-900 p-1 rounded-lg border border-neutral-800">
+      <div className="flex items-center gap-2 mb-4 flex-wrap justify-center">
+        <div className="flex items-center gap-2 bg-neutral-900 p-1 rounded-lg border border-neutral-800">
+          <button
+            onClick={() => onViewModeChange("visual")}
+            className={`text-xs px-3 py-1.5 rounded-md font-medium transition ${
+              viewMode === "visual"
+                ? "bg-blue-600 text-white"
+                : "text-neutral-400 hover:text-white"
+            }`}
+          >
+            Visual Design (What You See)
+          </button>
+          <button
+            onClick={() => onViewModeChange("blueprint")}
+            className={`text-xs px-3 py-1.5 rounded-md font-medium transition ${
+              viewMode === "blueprint"
+                ? "bg-amber-600 text-white"
+                : "text-neutral-400 hover:text-white"
+            }`}
+          >
+            Blueprint &amp; Cut Lines (Behind the Scenes)
+          </button>
+        </div>
+
         <button
-          onClick={() => onViewModeChange("visual")}
-          className={`text-xs px-3 py-1.5 rounded-md font-medium transition ${
-            viewMode === "visual"
-              ? "bg-blue-600 text-white"
-              : "text-neutral-400 hover:text-white"
+          onClick={onStarLayout}
+          disabled={!currentLayout?.objects?.length || starringLayout || loading}
+          title="Save this layout arrangement to train future AI designs"
+          className={`text-xs px-3 py-2 rounded-lg font-medium border transition disabled:opacity-40 ${
+            isCurrentStarred
+              ? "bg-amber-500/20 border-amber-400 text-amber-300"
+              : "bg-neutral-900 border-neutral-700 text-neutral-200 hover:border-amber-400 hover:text-amber-300"
           }`}
         >
-          Visual Design (What You See)
-        </button>
-        <button
-          onClick={() => onViewModeChange("blueprint")}
-          className={`text-xs px-3 py-1.5 rounded-md font-medium transition ${
-            viewMode === "blueprint"
-              ? "bg-amber-600 text-white"
-              : "text-neutral-400 hover:text-white"
-          }`}
-        >
-          Blueprint &amp; Cut Lines (Behind the Scenes)
+          {starringLayout
+            ? "Saving Star..."
+            : isCurrentStarred
+            ? `★ Starred (${starredCount})`
+            : `☆ Star Design for Training${starredCount > 0 ? ` (${starredCount})` : ""}`}
         </button>
       </div>
 

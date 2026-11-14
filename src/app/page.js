@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import CanvasStage from "@/components/CanvasStage";
 import IntakeSidebar, { SIZE_OPTIONS } from "@/components/IntakeSidebar";
 import InventoryTray from "@/components/InventoryTray";
@@ -39,7 +39,17 @@ export default function Home() {
   const [currentLayoutObj, setCurrentLayoutObj] = useState(null);
   const [rawSvg, setRawSvg] = useState("");
   const [loading, setLoading] = useState(false);
+  const [starringLayout, setStarringLayout] = useState(false);
+  const [starredCount, setStarredCount] = useState(0);
+  const [isCurrentStarred, setIsCurrentStarred] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
+
+  useEffect(() => {
+    fetch("/api/generate")
+      .then((r) => r.json())
+      .then((d) => { if (typeof d?.totalStarred === "number") setStarredCount(d.totalStarred); })
+      .catch(() => {});
+  }, []);
 
   const totalPhotoAreaMm2 = photos.reduce((sum, p) => sum + (p.w_in * 25.4 + 10) * (p.h_in * 25.4 + 10), 0);
   const usedPct = (totalPhotoAreaMm2 / (CANVAS_SIZE_MM * CANVAS_SIZE_MM)) * 100;
@@ -122,6 +132,7 @@ export default function Home() {
   const handleLayoutChange = (updatedLayout, commitHistory = true) => {
     setCurrentLayoutObj(updatedLayout);
     setRawSvg(compileLayoutToSvg(updatedLayout, defaultMatHex));
+    setIsCurrentStarred(false);
     if (!commitHistory) return;
     const jsonStr = JSON.stringify(updatedLayout, null, 2);
     setMessages((prev) => {
@@ -150,17 +161,41 @@ export default function Home() {
       : fallbackPapers?.length ? { theme: themeRecommendation.theme, papers: fallbackPapers, cutouts: [] } : null;
     runAsync(setLoading, async () => {
       const data = await postGenerate({ action: "generate_layout", messages: newMessages, currentLayout: currentLayoutObj ? JSON.stringify(currentLayoutObj) : null, photos: photos.map(({ id, w_in, h_in, label }) => ({ id, w_in, h_in, label })), extractedInventory });
+      if (data.usedModel) setActiveModelBadge(data.usedModel);
       if (data.svg) {
         setRawSvg(data.svg);
         setCurrentLayoutObj(JSON.parse(data.json));
-        setMessages((prev) => [...prev, { role: "assistant", content: data.json, isLayout: true, displayText: "✓ Updated layout using real contour-cut stickers." }]);
+        setIsCurrentStarred(false);
+        const summary = [data.archetype, data.designNotes].filter(Boolean).join(" — ");
+        const displayText = summary ? `✓ ${summary}` : "✓ Updated layout using real contour-cut stickers.";
+        setMessages((prev) => [...prev, { role: "assistant", content: data.json, isLayout: true, displayText }]);
       }
+    });
+  };
+
+  const handleStarLayout = () => {
+    if (!currentLayoutObj?.objects?.length || starringLayout) return;
+    const lastPrompt = [...messages].reverse().find((m) => m.role === "user")?.content || "";
+    runAsync(setStarringLayout, async () => {
+      const data = await postGenerate({
+        action: "star_layout",
+        currentLayout: currentLayoutObj,
+        photos: photos.map(({ id, w_in, h_in, label }) => ({ id, w_in, h_in, label })),
+        theme: inventory?.theme || themeRecommendation?.theme || "Scrapbook Page",
+        prompt: lastPrompt,
+      });
+      setStarredCount(data.totalStarred);
+      setIsCurrentStarred(true);
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: "", isLayout: false, displayText: `★ Starred layout saved to training library (${data.totalStarred} total designs). Future generations will learn from it.` },
+      ]);
     });
   };
 
   const handleReset = () => {
     setMessages([]); setRawSvg(""); setCurrentLayoutObj(null); setErrorMsg("");
-    setThemeRecommendation(null); setSuppliesUnlocked(Boolean(inventory || supplyImage));
+    setThemeRecommendation(null); setIsCurrentStarred(false); setSuppliesUnlocked(Boolean(inventory || supplyImage));
   };
   const handleAddPlaceholder = () => setPhotos((p) => [...p, { id: `photo_${p.length + 1}`, label: '4x3" Landscape', w_in: 4, h_in: 3, dataUrl: null }]);
   const handleUpdatePhotoSize = (i, lbl) => {
@@ -185,6 +220,7 @@ export default function Home() {
         viewMode={viewMode} onViewModeChange={setViewMode} loading={loading}
         renderedSvg={injectAssetsIntoSvg(rawSvg, photos, inventory?.cutouts || [], viewMode)}
         currentLayout={currentLayoutObj} onUpdateLayout={handleLayoutChange} onDropInventoryItem={handleDropInventoryItem}
+        onStarLayout={handleStarLayout} starringLayout={starringLayout} starredCount={starredCount} isCurrentStarred={isCurrentStarred}
       />
       <InventoryTray inventory={inventory} vectorizingId={vectorizingId} onVectorizeCutout={handleVectorizeCutout} />
     </div>
